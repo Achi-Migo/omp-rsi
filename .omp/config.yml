@@ -1,0 +1,24 @@
+# Project-scoped omp configuration for dsh-dwf
+# Aligned with DSH global optimization plan (context reduction, concurrency bounding)
+
+skills:
+  ignoredSkills:
+    - "arkcli-*"
+    - "bailian-*"
+    - "ms-*"
+
+plan:
+  enabled: true
+
+tools:
+  approvalMode: yolo
+
+task:
+  maxConcurrency: 2
+  maxRecursionDepth: 1
+  softRequestBudget: 100
+
+ask:
+  enabled: true
+  timeout: 0
+  notify: on

@@ -1,0 +1,19 @@
+{
+  "name": "@omp/rsi",
+  "version": "0.1.0",
+  "description": "Deterministic Recursive Self-Improvement (RSI) engine for Open Multi-agent Platform (omp)",
+  "type": "module",
+  "main": "packages/dwfx-core/src/index.ts",
+  "scripts": {
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "test": "node test/pareto-arbiter.test.mjs && node test/evolution-lifecycle.test.mjs && node test/profiler-learning.test.mjs && node test/evolution.test.mjs && node test/dwfx-core.test.mjs && node test/dwfx-cli.test.mjs",
+    "gate": "node scripts/evolution-gate.mjs --target=all"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

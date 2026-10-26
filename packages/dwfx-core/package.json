@@ -1,0 +1,8 @@
+{
+  "name": "@zakza/dwfx-core",
+  "version": "0.1.0",
+  "description": "Zero-dependency, invariant-enforced workflow mechanisms extracted from dsh-dwf",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts"
+}
