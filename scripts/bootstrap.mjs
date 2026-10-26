@@ -2,9 +2,9 @@
 /**
  * scripts/bootstrap.mjs
  *
- * One-click bootstrap, environment inspection, dependency resolution,
- * static type checking, full 6-suite test verification, and sandbox gate validation
- * for the omp-rsi self-evolution engine.
+ * One-click bootstrap, environment inspection, dependency resolution, and a
+ * single deterministic gate execution (typecheck + full test suite) for the
+ * omp-rsi self-evolution engine.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -165,99 +165,32 @@ function checkConfigAndDependencies() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Static Type Checking
+// Phase 3: Deterministic Verification Gate (single execution)
+//
+// One `evolution-gate.mjs --target=all --suite-detail` run provides the
+// typecheck verdict, per-suite TAP counts, and the gate contract itself.
+// Phases 3/4/5 previously re-ran typecheck and all tests twice; the whole
+// pipeline now executes each stage exactly once.
 // ---------------------------------------------------------------------------
-function runTypecheck() {
-  logHeader('Phase 3: Static Type Checking (Zero Emit)');
+const EXPECTED_SUITES = [
+  { file: 'test/pareto-arbiter.test.mjs', expected: 4, name: 'Pareto Arbiter & Tie Breaks' },
+  { file: 'test/evolution-lifecycle.test.mjs', expected: 9, name: 'Evolution Lifecycle & Worktree Sandbox' },
+  { file: 'test/profiler-learning.test.mjs', expected: 2, name: 'Context Profiler & Skill Promotion' },
+  { file: 'test/evolution.test.mjs', expected: 2, name: 'Evolution Engine 4 Operators' },
+  { file: 'test/dwfx-core.test.mjs', expected: 12, name: 'INV-1 ~ INV-4 Core Invariant Guarantees' },
+  { file: 'test/dwfx-cli.test.mjs', expected: 5, name: 'dwfx CLI Commands & Journal Tools' },
+];
+const EXPECTED_TOTAL = EXPECTED_SUITES.reduce((sum, suite) => sum + suite.expected, 0);
 
-  const tscPath = path.join(ROOT_DIR, 'node_modules', 'typescript', 'bin', 'tsc');
-  const start = Date.now();
-  const res = spawnSync('node', [tscPath, '--noEmit', '-p', 'tsconfig.json'], {
-    cwd: ROOT_DIR,
-    encoding: 'utf8',
-  });
-  const duration = Date.now() - start;
-  const passed = res.status === 0;
-
-  recordResult(
-    '3. Typecheck',
-    passed,
-    'TypeScript tsc --noEmit',
-    passed ? `0 errors in ${duration}ms` : (res.stdout || res.stderr).slice(0, 200)
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Phase 4: Full Test Suite Verification (6 Suites, 30 Tests)
-// ---------------------------------------------------------------------------
-function runTestSuite() {
-  logHeader('Phase 4: Full Test Suite Verification (6 Suites)');
-
-  const testFiles = [
-    { path: 'test/pareto-arbiter.test.mjs', expected: 4, name: 'Pareto Arbiter & Tie Breaks' },
-    { path: 'test/evolution-lifecycle.test.mjs', expected: 5, name: 'Evolution Lifecycle & Worktree Sandbox' },
-    { path: 'test/profiler-learning.test.mjs', expected: 2, name: 'Context Profiler & Skill Promotion' },
-    { path: 'test/evolution.test.mjs', expected: 2, name: 'Evolution Engine 4 Operators' },
-    { path: 'test/dwfx-core.test.mjs', expected: 12, name: 'INV-1 ~ INV-4 Core Invariant Guarantees' },
-    { path: 'test/dwfx-cli.test.mjs', expected: 5, name: 'dwfx CLI Commands & Journal Tools' },
-  ];
-
-  let totalPassed = 0;
-  let totalFailed = 0;
-  let allSuitesPassed = true;
-
-  for (const suite of testFiles) {
-    const fullPath = path.join(ROOT_DIR, suite.path);
-    const start = Date.now();
-    const res = spawnSync('node', [fullPath], {
-      cwd: ROOT_DIR,
-      encoding: 'utf8',
-    });
-    const duration = Date.now() - start;
-
-    const output = res.stdout + '\n' + res.stderr;
-    const passMatch = output.match(/# pass (\d+)/);
-    const failMatch = output.match(/# fail (\d+)/);
-
-    const passed = passMatch ? parseInt(passMatch[1], 10) : 0;
-    const failed = failMatch ? parseInt(failMatch[1], 10) : (res.status === 0 ? 0 : 1);
-
-    totalPassed += passed;
-    totalFailed += failed;
-
-    const suiteOk = res.status === 0 && failed === 0 && passed === suite.expected;
-    if (!suiteOk) {
-      allSuitesPassed = false;
-    }
-
-    recordResult(
-      '4. Test Suite',
-      suiteOk,
-      suite.name,
-      `${passed}/${suite.expected} passed in ${duration}ms`
-    );
-  }
-
-  const allThirtyPassed = allSuitesPassed && totalPassed === 30 && totalFailed === 0;
-  recordResult(
-    '4. Test Suite',
-    allThirtyPassed,
-    'All 6 Suites Aggregate Integrity',
-    `total ${totalPassed}/30 passed, ${totalFailed} failed`
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Phase 5: Sandbox Hard Gate & Smoke Check
-// ---------------------------------------------------------------------------
-function runGateVerification() {
-  logHeader('Phase 5: Sandbox Hard Gate & Smoke Validation');
+function runVerificationGate() {
+  logHeader(`Phase 3: Deterministic Gate — Typecheck + ${EXPECTED_SUITES.length} Suites (single run)`);
 
   const gateScript = path.join(ROOT_DIR, 'scripts', 'evolution-gate.mjs');
   const start = Date.now();
-  const res = spawnSync('node', [gateScript, '--target=all'], {
+  const res = spawnSync('node', [gateScript, '--target=all', '--suite-detail'], {
     cwd: ROOT_DIR,
     encoding: 'utf8',
+    timeout: 300_000,
   });
   const duration = Date.now() - start;
 
@@ -268,14 +201,66 @@ function runGateVerification() {
     // Ignore JSON parse error, handled below
   }
 
-  const gatePassed = res.status === 0 && gateReport?.ok === true && gateReport?.passRatio === 1.0;
+  if (!gateReport) {
+    recordResult(
+      '3. Gate',
+      false,
+      'Deterministic Evolution Hard Gate',
+      `unparseable gate output: exitCode=${res.status}${res.stderr ? `, ${res.stderr.slice(0, 200)}` : ''}`
+    );
+    return;
+  }
+
+  // 3.1 Typecheck verdict (gate stage `typecheck`)
+  const typecheckStage = (gateReport.stages ?? []).find((stage) => stage.name === 'typecheck');
   recordResult(
-    '5. Hard Gate',
+    '3. Gate',
+    typecheckStage?.exitCode === 0,
+    'TypeScript tsc --noEmit',
+    typecheckStage?.exitCode === 0
+      ? `0 errors in ${typecheckStage.durationMs}ms`
+      : `typecheck stage failed (exitCode=${typecheckStage?.exitCode ?? 'missing'})`
+  );
+
+  // 3.2 Per-suite TAP counts (gate `--suite-detail`)
+  let totalPassed = 0;
+  let totalFailed = 0;
+  let allSuitesPresent = true;
+  for (const suite of EXPECTED_SUITES) {
+    const actual = (gateReport.suites ?? []).find((entry) => entry.file === suite.file);
+    if (!actual) {
+      allSuitesPresent = false;
+      recordResult('3. Gate', false, suite.name, 'suite result missing from gate report');
+      continue;
+    }
+    totalPassed += actual.passed;
+    totalFailed += actual.failed;
+    const suiteOk = actual.exitCode === 0 && actual.failed === 0 && actual.passed === suite.expected;
+    recordResult(
+      '3. Gate',
+      suiteOk,
+      suite.name,
+      `${actual.passed}/${suite.expected} passed in ${actual.durationMs}ms`
+    );
+  }
+
+  const aggregateOk = allSuitesPresent && totalPassed === EXPECTED_TOTAL && totalFailed === 0;
+  recordResult(
+    '3. Gate',
+    aggregateOk,
+    `All ${EXPECTED_SUITES.length} Suites Aggregate Integrity`,
+    `total ${totalPassed}/${EXPECTED_TOTAL} passed, ${totalFailed} failed`
+  );
+
+  // 3.3 Gate contract: exit code, ok flag, and pass ratio
+  const gatePassed = res.status === 0 && gateReport.ok === true && gateReport.passRatio === 1.0;
+  recordResult(
+    '3. Gate',
     gatePassed,
     'Deterministic Evolution Hard Gate',
     gatePassed
       ? `passRatio: 1.0, stages: ${gateReport.passedStages}/${gateReport.totalStages}, ${duration}ms`
-      : `Gate failed: exitCode=${res.status}`
+      : `Gate failed: exitCode=${res.status}, skippedStages=${gateReport.skippedStages ?? 0}`
   );
 }
 
@@ -288,9 +273,7 @@ async function main() {
 
   await inspectEnvironment();
   checkConfigAndDependencies();
-  runTypecheck();
-  runTestSuite();
-  runGateVerification();
+  runVerificationGate();
 
   logHeader('Summary & Decision Report');
   const failedItems = summary.filter((item) => !item.success);

@@ -42,6 +42,7 @@ export interface RsiCandidateInput {
   operator: RsiOperator
   parentIds: string[]
   diffPatch: string
+  patchHash?: string
   normalizedErrorHash?: string
   exitCode?: number
   durationMs?: number
@@ -56,6 +57,7 @@ export interface RsiCandidateRecord {
   operator: RsiOperator
   parentIds: string[]
   diffPatch: string
+  patchHash?: string
   normalizedErrorHash?: string
   exitCode: number
   durationMs: number
@@ -63,6 +65,13 @@ export interface RsiCandidateRecord {
   status: RsiCandidateStatus
   timeCreated: number
   timeUpdated: number
+}
+
+export interface CachedEvaluation {
+  status: 'passed' | 'failed'
+  exitCode: number
+  durationMs: number
+  testPassRatio: number
 }
 
 export interface RsiEvaluation {
@@ -109,6 +118,7 @@ interface CandidateRow {
   operator: RsiOperator
   parent_ids_json: string
   diff_patch: string
+  patch_hash: string | null
   normalized_error_hash: string | null
   exit_code: number
   duration_ms: number
@@ -150,13 +160,16 @@ export class RsiStore {
           set next_candidate_seq = next_candidate_seq + 1, time_updated = ?
           where id = ? returning next_candidate_seq`,
         insertCandidate: `insert into rsi_candidate (
-          id, task_id, sequence, operator, parent_ids_json, diff_patch,
+          id, task_id, sequence, operator, parent_ids_json, diff_patch, patch_hash,
           normalized_error_hash, exit_code, duration_ms, test_pass_ratio,
           status, time_created, time_updated
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         getCandidate: 'select * from rsi_candidate where id = ?',
         listCandidates: 'select * from rsi_candidate where task_id = ? order by sequence',
-        updatePatch: 'update rsi_candidate set diff_patch = ?, time_updated = ? where id = ?',
+        updatePatch: 'update rsi_candidate set diff_patch = ?, patch_hash = ?, time_updated = ? where id = ?',
+        findCachedEvaluation: `select status, exit_code, duration_ms, test_pass_ratio
+          from rsi_candidate where patch_hash = ? and status in ('passed', 'failed')
+          order by time_updated desc, id desc limit 1`,
         setEvaluating: `update rsi_candidate
           set status = 'evaluating', time_updated = ? where id = ? and status = 'pending'`,
         recordEvaluation: `update rsi_candidate set
@@ -225,7 +238,6 @@ export class RsiStore {
         now,
         now,
       )
-      this.prune()
       return this.requireTask(input.id)
     })
   }
@@ -247,6 +259,7 @@ export class RsiStore {
         input.operator,
         JSON.stringify(input.parentIds),
         input.diffPatch,
+        input.patchHash ?? null,
         input.normalizedErrorHash ?? null,
         input.exitCode ?? -1,
         input.durationMs ?? 0,
@@ -255,7 +268,6 @@ export class RsiStore {
         now,
         now,
       )
-      this.prune()
       return this.requireCandidate(input.id)
     })
   }
@@ -269,8 +281,22 @@ export class RsiStore {
     return (this.statements.listCandidates.all(taskId) as unknown as CandidateRow[]).map(mapCandidate)
   }
 
-  updatePatch(candidateId: string, diffPatch: string): void {
-    this.statements.updatePatch.run(diffPatch, this.now(), candidateId)
+  updatePatch(candidateId: string, diffPatch: string, patchHash?: string): void {
+    this.statements.updatePatch.run(diffPatch, patchHash ?? null, this.now(), candidateId)
+  }
+
+  /** INV-1: the newest terminal evaluation of an identical patch, if any. */
+  findEvaluationByPatchHash(patchHash: string): CachedEvaluation | undefined {
+    const row = this.statements.findCachedEvaluation.get(patchHash) as
+      | { status: 'passed' | 'failed'; exit_code: number; duration_ms: number; test_pass_ratio: number }
+      | undefined
+    if (!row) return undefined
+    return {
+      status: row.status,
+      exitCode: row.exit_code,
+      durationMs: row.duration_ms,
+      testPassRatio: row.test_pass_ratio,
+    }
   }
 
   setCandidateEvaluating(candidateId: string): void {
@@ -298,6 +324,8 @@ export class RsiStore {
     const now = this.now()
     return this.transaction(() => {
       this.statements.settleTask.run(status, details.championId ?? null, details.experience ?? null, now, now, taskId)
+      // Retention prune runs once per settled run instead of inside every write;
+      // the retainedRuns bound is enforced at run granularity, not per candidate.
       this.prune()
       return this.requireTask(taskId)
     })
@@ -408,6 +436,7 @@ function mapCandidate(row: CandidateRow): RsiCandidateRecord {
     operator: row.operator,
     parentIds: JSON.parse(row.parent_ids_json) as string[],
     diffPatch: row.diff_patch,
+    patchHash: row.patch_hash ?? undefined,
     normalizedErrorHash: row.normalized_error_hash ?? undefined,
     exitCode: row.exit_code,
     durationMs: row.duration_ms,

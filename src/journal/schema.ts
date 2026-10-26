@@ -121,6 +121,7 @@ create table if not exists rsi_candidate (
   operator text not null check(operator in ('draft', 'improve', 'debug', 'crossover')),
   parent_ids_json text not null,
   diff_patch text not null,
+  patch_hash text,
   normalized_error_hash text,
   exit_code integer not null default -1,
   duration_ms integer not null default 0,
@@ -132,6 +133,7 @@ create table if not exists rsi_candidate (
 );
 
 create index if not exists rsi_candidate_task_idx on rsi_candidate(task_id, sequence);
+create index if not exists rsi_candidate_patch_hash_idx on rsi_candidate(patch_hash);
 create index if not exists rsi_task_skill_idx on rsi_task(skill_name, status, skill_promoted);
 create index if not exists dwf_node_run_idx on dwf_node(run_id);
 create index if not exists dwf_node_artifact_idx on dwf_node(run_id, artifact_id);
@@ -143,4 +145,11 @@ create index if not exists dwf_event_artifact_idx on dwf_event(run_id, json_extr
 
 export function initSchema(db: DatabaseSync): void {
   db.exec(DDL)
+  // Databases created before patch_hash existed need a one-shot idempotent migration;
+  // `create table if not exists` cannot extend an existing table.
+  const columns = db.prepare("pragma table_info('rsi_candidate')").all() as unknown as { name: string }[]
+  if (!columns.some((column) => column.name === 'patch_hash')) {
+    db.exec('alter table rsi_candidate add column patch_hash text')
+    db.exec('create index if not exists rsi_candidate_patch_hash_idx on rsi_candidate(patch_hash)')
+  }
 }

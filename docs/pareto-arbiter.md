@@ -29,7 +29,7 @@ $$\vec{C}(s) = \Big( \text{changedFiles},\; \text{changedLines},\; \text{request
 - `changedLines`：变更总行数（`additions + deletions`）；
 - `requestCount`：方案产出期间消耗的子调用轮次；
 - `tokenCount`：推演该方案消耗的模型 Token 计数；
-- `durationMs`：沙箱门禁测试实际耗时（毫秒）。
+- `durationMs`：沙箱门禁测试实际耗时（毫秒）。注意：交叉候选经快速通道评估（`--target=test` 跳过 tsc）时，其 `durationMs` 仅计测试阶段，与全量门禁候选不完全同标尺；由于交叉候选的 `changedFiles`/`changedLines` 严格不小于其父代之和，Champion 排序在首两维即分出胜负，实际几乎不会仅凭 `durationMs` 夺冠。
 
 ### 2.3 支配关系判定 (Pareto Dominance)
 

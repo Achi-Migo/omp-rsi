@@ -7,12 +7,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import {
   EvolutionController,
   MAX_PATCH_BYTES,
   evaluateCandidateInSandbox,
 } from '../.omp/tools/evolution.ts';
 import { RsiStore } from '../src/journal/rsi-store.ts';
+
+const GATE_SCRIPT = fileURLToPath(new URL('../scripts/evolution-gate.mjs', import.meta.url));
 
 function patchFor(file, replacement = 'new') {
   return `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+${replacement}\n`;
@@ -219,3 +222,127 @@ function git(cwd, args) {
   assert.equal(result.status, 0, result.stderr);
   return result.stdout;
 }
+
+test('identical patch hashes reuse the cached terminal outcome without a sandbox', async () => {
+  const cwd = temporaryDirectory();
+  const store = new RsiStore(new DatabaseSync(':memory:'));
+  let evaluations = 0;
+  const controller = new EvolutionController({
+    cwd,
+    store,
+    applyChampion: false,
+    evaluator: async () => {
+      evaluations += 1;
+      return { exitCode: 0, durationMs: 7, testPassRatio: 1 };
+    },
+  });
+  try {
+    const patchX = patchFor('cache-x.txt');
+    const patchY = patchFor('cache-y.txt');
+    await controller.begin({ taskId: 'cache-run-a', objective: 'seed the patch cache' });
+    await controller.record({ runId: 'cache-run-a', candidateId: 'cand-draft-1', diffPatch: patchX, patchHash: sha256(patchX) });
+    const second = await controller.record({ runId: 'cache-run-a', candidateId: 'cand-draft-2', diffPatch: patchY, patchHash: sha256(patchY) });
+    await controller.record({
+      runId: 'cache-run-a', candidateId: second.candidateId, diffPatch: second.diffPatch, patchHash: second.patchHash,
+    });
+    assert.equal(evaluations, 3);
+
+    await controller.begin({ taskId: 'cache-run-b', objective: 'reuse the cache' });
+    const cachedAction = await controller.record({
+      runId: 'cache-run-b', candidateId: 'cand-draft-1', diffPatch: patchX, patchHash: sha256(patchX),
+    });
+    assert.equal(cachedAction.cached, true);
+    assert.equal(evaluations, 3);
+    assert.equal(store.getCandidate('cache-run-b:cand-draft-1').status, 'passed');
+  } finally {
+    controller.close();
+    store.close();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('evaluationConcurrency option allows two parallel gates on capable hosts', async () => {
+  const cwd = temporaryDirectory();
+  const store = new RsiStore(new DatabaseSync(':memory:'));
+  let active = 0;
+  let peak = 0;
+  const controller = new EvolutionController({
+    cwd,
+    store,
+    applyChampion: false,
+    evaluationConcurrency: 2,
+    evaluator: async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await delay(30);
+      active -= 1;
+      return { exitCode: 0, durationMs: 5, testPassRatio: 1 };
+    },
+  });
+  try {
+    await controller.begin({ taskId: 'parallel-run', objective: 'parallel evaluation' });
+    const patchA = patchFor('parallel-a.txt');
+    const patchB = patchFor('parallel-b.txt');
+    await Promise.all([
+      controller.record({ runId: 'parallel-run', candidateId: 'cand-draft-1', diffPatch: patchA, patchHash: sha256(patchA) }),
+      controller.record({ runId: 'parallel-run', candidateId: 'cand-draft-2', diffPatch: patchB, patchHash: sha256(patchB) }),
+    ]);
+    assert.equal(peak, 2);
+  } finally {
+    controller.close();
+    store.close();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('crossover evaluation fast-tracks to the test-only gate target', async () => {
+  const cwd = temporaryDirectory();
+  const store = new RsiStore(new DatabaseSync(':memory:'));
+  const observed = [];
+  const controller = new EvolutionController({
+    cwd,
+    store,
+    applyChampion: false,
+    evaluator: async (context) => {
+      observed.push([context.candidateId, context.gateTarget ?? 'all']);
+      return { exitCode: 0, durationMs: 5, testPassRatio: 1 };
+    },
+  });
+  try {
+    await controller.begin({ taskId: 'fasttrack-run', objective: 'fast-track crossover' });
+    const patchA = patchFor('fast-a.txt');
+    const patchB = patchFor('fast-b.txt');
+    await controller.record({ runId: 'fasttrack-run', candidateId: 'cand-draft-1', diffPatch: patchA, patchHash: sha256(patchA) });
+    const second = await controller.record({ runId: 'fasttrack-run', candidateId: 'cand-draft-2', diffPatch: patchB, patchHash: sha256(patchB) });
+    const completed = await controller.record({
+      runId: 'fasttrack-run', candidateId: second.candidateId, diffPatch: second.diffPatch, patchHash: second.patchHash,
+    });
+    assert.equal(completed.state, 'completed');
+    assert.deepEqual(observed, [
+      ['cand-draft-1', 'all'],
+      ['cand-draft-2', 'all'],
+      ['cand-crossover-3', 'test'],
+    ]);
+  } finally {
+    controller.close();
+    store.close();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('gate fails fast: a failing typecheck stage skips the test stage', () => {
+  const cwd = temporaryDirectory();
+  try {
+    const res = spawnSync('node', [GATE_SCRIPT, '--target=all'], { cwd, encoding: 'utf8' });
+    const report = JSON.parse(res.stdout);
+    assert.equal(res.status, 1);
+    assert.equal(report.ok, false);
+    assert.equal(report.totalStages, 1);
+    assert.equal(report.passedStages, 0);
+    assert.equal(report.skippedStages, 1);
+    assert.equal(report.passRatio, 0);
+    assert.notEqual(report.errorHash, '');
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});

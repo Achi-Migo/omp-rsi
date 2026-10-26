@@ -6,7 +6,7 @@
 - **单连接模型**：每个 `RsiStore` 实例在生命周期内独占单一底层 Database 句柄，无连接池开销；
 - **WAL 模式与性能**：执行 `PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;`；
 - **预编译复用**：所有高频操作（插入候选、更新门禁、序列号分配、指标聚合）均在打开时生成 PreparedStatement，避免 SQL 重复语法解析；
-- **50 轮有限事实留存**：自动统计已完结任务（`status IN ('succeeded', 'failed', 'cancelled')`），超过 50 个已结算任务时触发级联修剪（Cascade Prune），保证数据库常态大小在数兆字节以内。
+- **50 轮有限事实留存**：自动统计已完结任务（`status IN ('succeeded', 'failed', 'cancelled')`），超过 50 个已结算任务时触发级联修剪（Cascade Prune），修剪只在 `settleTask`（每轮一次）执行而非每笔写入，保证数据库常态大小在数兆字节以内。
 
 ---
 
@@ -24,16 +24,18 @@ CREATE TABLE IF NOT EXISTS rsi_task (
   cwd TEXT NOT NULL,
   objective TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'cancelled')),
-  champion_id TEXT,
+  autonomous INTEGER NOT NULL DEFAULT 1 CHECK (autonomous IN (0, 1)),
+  skill_name TEXT,
+  skill_reused INTEGER NOT NULL DEFAULT 0 CHECK (skill_reused IN (0, 1)),
+  skill_promoted INTEGER NOT NULL DEFAULT 0 CHECK (skill_promoted IN (0, 1)),
   staging_tool_path TEXT,
   promoted_tool_path TEXT,
-  skill_name TEXT,
-  skill_reused INTEGER NOT NULL DEFAULT 0,
-  autonomous INTEGER NOT NULL DEFAULT 1,
-  error_message TEXT,
+  experience TEXT,
+  champion_id TEXT,
+  next_candidate_seq INTEGER NOT NULL DEFAULT 0,
   time_created INTEGER NOT NULL,
-  time_completed INTEGER,
-  FOREIGN KEY (champion_id) REFERENCES rsi_candidate(id) ON DELETE SET NULL
+  time_updated INTEGER NOT NULL,
+  time_completed INTEGER
 );
 ```
 
@@ -44,35 +46,38 @@ CREATE TABLE IF NOT EXISTS rsi_task (
 ```sql
 CREATE TABLE IF NOT EXISTS rsi_candidate (
   id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES rsi_task(id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL,
-  operator TEXT NOT NULL CHECK (operator IN ('draft', 'debug', 'crossover')),
-  parent_ids_json TEXT NOT NULL DEFAULT '[]',
+  operator TEXT NOT NULL CHECK (operator IN ('draft', 'improve', 'debug', 'crossover')),
+  parent_ids_json TEXT NOT NULL,
   diff_patch TEXT NOT NULL,
-  patch_hash TEXT NOT NULL,
+  patch_hash TEXT,
   normalized_error_hash TEXT,
-  exit_code INTEGER,
-  duration_ms INTEGER,
-  test_pass_ratio REAL,
-  status TEXT NOT NULL CHECK (status IN ('pending', 'evaluating', 'passed', 'failed', 'dominated', 'champion')),
+  exit_code INTEGER NOT NULL DEFAULT -1,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  test_pass_ratio REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'evaluating', 'passed', 'failed', 'deadlocked')),
   time_created INTEGER NOT NULL,
   time_updated INTEGER NOT NULL,
-  FOREIGN KEY (task_id) REFERENCES rsi_task(id) ON DELETE CASCADE
+  UNIQUE(task_id, sequence)
 );
 
-CREATE INDEX IF NOT EXISTS idx_rsi_candidate_task_seq ON rsi_candidate(task_id, sequence);
+CREATE INDEX IF NOT EXISTS rsi_candidate_task_idx ON rsi_candidate(task_id, sequence);
+CREATE INDEX IF NOT EXISTS rsi_candidate_patch_hash_idx ON rsi_candidate(patch_hash);
 ```
+
+`patch_hash`（补丁文本的 SHA-256）支撑 INV-1 幂等缓存：`evolution_record` 提交时先按哈希检索既有终态候选（`status IN ('passed', 'failed')`），命中则直接复用其门禁结论，跳过整个沙箱评估。
 
 ---
 
 ## 3. 事务性序号分配与防竞态
 
-为保证单任务内候选方案时序严格连续，`RsiStore.createCandidate()` 在 SQLite 即时事务内执行：
+为保证单任务内候选方案时序严格连续，`RsiStore.createCandidate()` 在 SQLite 即时事务内执行计数器列自增并回读：
 
 ```sql
-SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq 
-FROM rsi_candidate 
-WHERE task_id = ?;
+UPDATE rsi_task
+SET next_candidate_seq = next_candidate_seq + 1, time_updated = ?
+WHERE id = ? RETURNING next_candidate_seq;
 ```
 
 在同一事务内完成编号获取与数据插入，彻底消除并发插入或重试带来的序号空洞与重复。
@@ -84,8 +89,8 @@ WHERE task_id = ?;
 宿主控制器（`.omp/tools/evolution.ts`）集成 `KeyedScheduler`，针对代码仓库施加单并发锁：
 
 - **调度键 (Actor Key)**：`repo:${path.resolve(cwd)}`；
-- **并发度上限**：`maxConcurrency = 1`；
-- **队列语义**：同仓库的所有评估请求严格遵循先进先出（FIFO）队列排队，禁止并行争抢 CPU 编译或触发 Git 索引死锁（`index.lock`）。
+- **并发度上限**：默认 `maxConcurrency = 1`（INV-2 基线，2 vCPU 主机必须保持 1）；≥4 核宿主可通过 `EvolutionControllerOptions.evaluationConcurrency` 或环境变量 `RSI_EVAL_CONCURRENCY` 提升，此时各候选以 `repo:<cwd>:eval:<candidateId>` 细分键入队，在全局并发帽内并行评估；
+- **队列语义**：默认同仓库的所有评估请求严格遵循先进先出（FIFO）队列排队，禁止并行争抢 CPU 编译或触发 Git 索引死锁（`index.lock`）。
 
 ---
 

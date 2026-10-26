@@ -1,5 +1,6 @@
-# Project-scoped omp configuration for dsh-dwf
-# Aligned with DSH global optimization plan (context reduction, concurrency bounding)
+# Project-scoped omp configuration for omp-rsi
+# Low-resource profile: strict serial evaluation (INV-2), bounded task fan-out,
+# context reduction via ignored third-party skill namespaces.
 
 skills:
   ignoredSkills:
@@ -20,5 +21,7 @@ task:
 
 ask:
   enabled: true
+  # timeout: 0 is deliberate: red-line escalation cards wait indefinitely for a
+  # human decision and never auto-approve on timeout (see docs/operations-and-escalation.md §1.1).
   timeout: 0
   notify: on

@@ -73,17 +73,29 @@
 ```bash
 node scripts/evolution-gate.mjs --target=all
 ```
-门禁执行进程设置独立超时（默认 120 秒），并将输出的标准 JSON 结构反序列化：
+
+门禁为两阶段串行执行（typecheck → test），并内置三项性能与治理机制：
+
+- **失败快速短路 (Fail-Fast)**：`--target=all` 时若 typecheck 阶段失败，测试阶段直接跳过（`skippedStages` 计数），失败候选不再支付整套测试成本，门禁耗时从全量降至单阶段；
+- **交叉候选快速通道 (Crossover Fast-Track)**：双父代均已通过全量门禁且文件集不相交的交叉候选，沙箱以 `--target=test` 跳过 tsc（各父代类型安全已独立验证）；若该候选最终成为 Champion，合入主工作区后会补跑一次 `--target=typecheck` 兜底，失败即回滚补丁，保证"合并的冠军必然通过类型检查"；
+- **逐套件明细模式**：`--suite-detail` 将 6 个测试套件拆为独立阶段执行并在报告中输出 `suites[]` 逐套件计数，供 `npm run bootstrap` 单次执行完成全部校验（typecheck 与测试各只跑一遍）。
+
+门禁执行进程设置独立超时（默认 120 秒，可用 `RSI_GATE_STAGE_TIMEOUT_MS` 控制内部阶段超时），超时信号以**进程组**方式投递（SIGTERM → 5 秒宽限 → SIGKILL），彻底终结 tsc / node --test 孙进程孤儿导致的超时后 CPU 残留烧录。输出标准 JSON 结构：
 ```json
 {
   "ok": true,
   "target": "all",
-  "totalStages": 4,
-  "passedStages": 4,
+  "totalStages": 2,
+  "passedStages": 2,
+  "skippedStages": 0,
   "passRatio": 1,
-  "durationMs": 9804,
+  "durationMs": 4800,
   "exitCode": 0,
-  "errorHash": ""
+  "errorHash": "",
+  "stages": [
+    { "name": "typecheck", "cmd": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json", "exitCode": 0, "durationMs": 2100, "timedOut": false },
+    { "name": "test", "cmd": "node --test test/pareto-arbiter.test.mjs ...", "exitCode": 0, "durationMs": 2700, "timedOut": false }
+  ]
 }
 ```
 并将以上数据结构完整同步回写入 SQLite `rsi_candidate` 记录中。

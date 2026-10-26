@@ -58,12 +58,20 @@ export interface EvolutionAction {
   };
   frontier?: string[];
   applied?: boolean;
+  /** True when this record() reused a cached terminal outcome for an identical patch hash. */
+  cached?: boolean;
 }
 
 export interface EvolutionEvaluationContext {
   cwd: string;
   baseline: string;
   candidateId: string;
+  /**
+   * Gate target for this evaluation. Crossover candidates whose parents both
+   * passed the full gate run `test` only (typecheck fast-track); everything
+   * else runs the complete `all` gate.
+   */
+  gateTarget?: 'all' | 'test';
 }
 
 export type EvolutionEvaluator = (
@@ -78,6 +86,8 @@ interface EvolutionRun {
   engine: EvolutionEngine;
   appended?: 'debug' | 'crossover';
   experience?: string;
+  /** Candidate ids evaluated through the typecheck-skipping fast track. */
+  fastTrackedCandidates?: Set<string>;
 }
 
 export interface EvolutionControllerOptions {
@@ -87,6 +97,12 @@ export interface EvolutionControllerOptions {
   evaluator?: EvolutionEvaluator;
   applyChampion?: boolean;
   gateTimeoutMs?: number;
+  /**
+   * INV-2 evaluation concurrency. Defaults to 1 (strict serial FIFO, required
+   * on 2 vCPU hosts); hosts with more cores may raise it, also via the
+   * RSI_EVAL_CONCURRENCY environment variable.
+   */
+  evaluationConcurrency?: number;
 }
 
 interface ProcessResult {
@@ -97,7 +113,13 @@ interface ProcessResult {
   timedOut: boolean;
 }
 
-/** Runs one child process with bounded captured output and cooperative cancellation. */
+/** Runs one child process with bounded captured output and cooperative cancellation.
+ *
+ * The child is spawned detached as its own process group so a timeout or abort
+ * can SIGTERM — then SIGKILL after a grace period — the entire tree, including
+ * grandchildren spawned by shell stages (tsc, node --test). Without the group
+ * kill, a timed-out gate leaves orphan stages burning CPU past the deadline.
+ */
 export function runProcess(
   command: string,
   args: string[],
@@ -109,25 +131,44 @@ export function runProcess(
     cwd: options.cwd,
     env: process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
+    detached: true,
   });
   let stdout = '';
   let stderr = '';
   let timedOut = false;
   let settled = false;
+  let escalate: ReturnType<typeof setTimeout> | undefined;
+
+  const killGroup = (): void => {
+    const signalChild = (signal: NodeJS.Signals) => {
+      if (child.pid === undefined) {
+        child.kill(signal);
+        return;
+      }
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // The group already exited; the close event settles the result.
+      }
+    };
+    signalChild('SIGTERM');
+    escalate = setTimeout(() => signalChild('SIGKILL'), 5_000);
+  };
 
   const finish = (code: number) => {
     if (settled) return;
     settled = true;
     clearTimeout(timeout);
+    if (escalate !== undefined) clearTimeout(escalate);
     options.signal?.removeEventListener('abort', onAbort);
     resolve({ code, stdout, stderr, durationMs: Date.now() - start, timedOut });
   };
   const onAbort = () => {
-    child.kill('SIGTERM');
+    killGroup();
   };
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGTERM');
+    killGroup();
   }, options.timeoutMs ?? 120_000);
 
   child.stdout.on('data', (chunk: Buffer) => {
@@ -141,6 +182,7 @@ export function runProcess(
   });
   child.once('error', (error) => {
     clearTimeout(timeout);
+    if (escalate !== undefined) clearTimeout(escalate);
     options.signal?.removeEventListener('abort', onAbort);
     reject(error);
   });
@@ -159,7 +201,8 @@ export class EvolutionController {
   private readonly ownsStore: boolean;
   private readonly evaluator: EvolutionEvaluator;
   private readonly applyChampion: boolean;
-  private readonly scheduler = new KeyedScheduler(1, { attempts: 1 });
+  private readonly scheduler: KeyedScheduler;
+  private readonly evaluationConcurrency: number;
   private readonly runs = new Map<string, EvolutionRun>();
   private closed = false;
 
@@ -169,10 +212,13 @@ export class EvolutionController {
     this.store = options.store ?? RsiStore.open(options.dbPath ?? path.join(this.cwd, '.omp/rsi.db'));
     this.ownsStore = options.store === undefined;
     this.applyChampion = options.applyChampion ?? true;
+    this.evaluationConcurrency = resolveEvaluationConcurrency(options.evaluationConcurrency);
+    this.scheduler = new KeyedScheduler(this.evaluationConcurrency, { attempts: 1 });
     this.evaluator = options.evaluator ?? ((context, diffPatch, signal) =>
       evaluateCandidateInSandbox(context, diffPatch, {
         signal,
         timeoutMs: options.gateTimeoutMs ?? 120_000,
+        gateTarget: context.gateTarget,
       }));
   }
 
@@ -252,27 +298,53 @@ export class EvolutionController {
     candidate.metrics.changedFiles = patch.changedFiles;
     candidate.metrics.changedLines = patch.changedLines;
     const storedId = `${input.runId}:${input.candidateId}`;
-    this.store.updatePatch(storedId, input.diffPatch);
+    this.store.updatePatch(storedId, input.diffPatch, expectedHash);
     this.store.setCandidateEvaluating(storedId);
     if (input.experience?.trim()) run.experience = input.experience.trim();
 
-    return this.scheduler.enqueue(this.actorKey, {
+    // KeyedScheduler serializes per actor key: at the INV-2 default (1) the
+    // repo key gives one strict global FIFO; above it, per-candidate keys let
+    // the global cap admit parallel gates while each key stays serial.
+    const evaluationKey = this.evaluationConcurrency > 1
+      ? `${this.actorKey}:eval:${input.candidateId}`
+      : this.actorKey;
+    return this.scheduler.enqueue(evaluationKey, {
       isProviderError: () => false,
       work: async () => {
         let outcome: EvaluationOutcome;
-        try {
-          outcome = await this.evaluator(
-            { cwd: this.cwd, baseline: run.baseline, candidateId: candidate.id },
-            input.diffPatch,
-            signal,
-          );
-        } catch (error) {
+        let cachedHit = false;
+        const cached = this.store.findEvaluationByPatchHash(input.patchHash);
+        if (cached) {
+          // INV-1: an identical patch hash already reached a terminal outcome;
+          // reuse it instead of paying the sandbox gate again.
+          cachedHit = true;
           outcome = {
-            exitCode: 1,
-            durationMs: 0,
-            testPassRatio: 0,
-            stderr: `UNKNOWN_STATE_SUSPENSION: ${error instanceof Error ? error.message : String(error)}`,
+            exitCode: cached.exitCode,
+            durationMs: cached.durationMs,
+            testPassRatio: cached.testPassRatio,
+            stderr: cached.status === 'passed'
+              ? undefined
+              : `CACHED_OUTCOME: an identical patch hash already failed with exitCode=${cached.exitCode}`,
           };
+        } else {
+          const gateTarget = candidate.operator === 'crossover' ? 'test' : 'all';
+          if (gateTarget === 'test') {
+            (run.fastTrackedCandidates ??= new Set<string>()).add(candidate.id);
+          }
+          try {
+            outcome = await this.evaluator(
+              { cwd: this.cwd, baseline: run.baseline, candidateId: candidate.id, gateTarget },
+              input.diffPatch,
+              signal,
+            );
+          } catch (error) {
+            outcome = {
+              exitCode: 1,
+              durationMs: 0,
+              testPassRatio: 0,
+              stderr: `UNKNOWN_STATE_SUSPENSION: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
         }
         outcome.requestCount = input.requestCount ?? candidate.metrics.requestCount;
         outcome.tokenCount = input.tokenCount ?? candidate.metrics.tokenCount;
@@ -284,25 +356,30 @@ export class EvolutionController {
           testPassRatio: evaluated.candidate.metrics.testPassRatio,
           status: evaluated.candidate.status as 'passed' | 'failed' | 'deadlocked',
         });
+        const decorate = (action: EvolutionAction): EvolutionAction => {
+          if (cachedHit) action.cached = true;
+          return action;
+        };
         if (outcome.stderr?.startsWith('UNKNOWN_STATE_SUSPENSION:')) {
           this.store.settleTask(run.task.id, 'failed');
-          return {
+          return decorate({
             state: 'escalated',
             runId: run.task.id,
             candidateId: candidate.id,
             reason: outcome.stderr,
-          };
+          });
         }
         if (evaluated.requiresEscalation) {
           this.store.settleTask(run.task.id, 'failed');
-          return {
+          return decorate({
             state: 'escalated',
             runId: run.task.id,
             candidateId: candidate.id,
             reason: evaluated.escalationReason,
-          };
+          });
         }
-        return this.nextAction(run);
+        const action = await this.nextAction(run);
+        return decorate(action);
       },
     });
   }
@@ -399,6 +476,29 @@ export class EvolutionController {
         reason: `UNKNOWN_STATE_SUSPENSION: git apply failed after a successful check: ${applied.stderr}`,
       };
     }
+    if (run.fastTrackedCandidates?.has(champion.id)) {
+      // The champion skipped its sandbox typecheck; re-establish the global
+      // "merged champions always typecheck" guarantee on the real workspace.
+      const typecheck = await runProcess(
+        process.execPath,
+        [path.join(this.cwd, 'node_modules/typescript/bin/tsc'), '--noEmit', '-p', 'tsconfig.json'],
+        { cwd: this.cwd, timeoutMs: 60_000 },
+      );
+      if (typecheck.code !== 0) {
+        await runProcess('git', ['apply', '-R', '--whitespace=nowarn', '-'], {
+          cwd: this.cwd,
+          timeoutMs: 10_000,
+          input: champion.diffPatch,
+        });
+        this.store.settleTask(run.task.id, 'failed', { experience: run.experience });
+        return {
+          state: 'escalated',
+          runId: run.task.id,
+          candidateId: champion.id,
+          reason: `FAST_TRACK_TYPECHECK_FAILED: champion typecheck failed after merge and was rolled back: ${typecheck.stderr.slice(0, 400)}`,
+        };
+      }
+    }
     this.store.settleTask(run.task.id, 'succeeded', {
       championId: `${run.task.id}:${champion.id}`,
       experience: run.experience,
@@ -460,6 +560,7 @@ export class EvolutionController {
       operator: candidate.operator,
       parentIds: candidate.parentIds,
       diffPatch: candidate.diffPatch,
+      patchHash: candidate.diffPatch ? createHash('sha256').update(candidate.diffPatch).digest('hex') : undefined,
       normalizedErrorHash: candidate.normalizedErrorHash,
       exitCode: candidate.metrics.exitCode,
       durationMs: candidate.metrics.durationMs,
@@ -477,7 +578,7 @@ export class EvolutionController {
 export async function evaluateCandidateInSandbox(
   context: EvolutionEvaluationContext,
   diffPatch: string,
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number; gateTarget?: 'all' | 'test' } = {},
 ): Promise<EvaluationOutcome> {
   const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'rsi-cand-'));
   const sandbox = path.join(tempRoot, 'repo');
@@ -521,7 +622,7 @@ export async function evaluateCandidateInSandbox(
     }
 
     const gatePath = path.join(context.cwd, 'scripts/evolution-gate.mjs');
-    const gate = await runProcess(process.execPath, [gatePath, '--target=all'], {
+    const gate = await runProcess(process.execPath, [gatePath, `--target=${options.gateTarget ?? 'all'}`], {
       cwd: sandbox,
       signal: options.signal,
       timeoutMs: options.timeoutMs,
@@ -565,20 +666,33 @@ async function overlayWorkingChanges(cwd: string, sandbox: string, signal?: Abor
     runProcess('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd, signal, timeoutMs: 10_000 }),
   ]);
   if (modified.code !== 0 || untracked.code !== 0) throw new Error('unable to enumerate working-tree changes');
-  const files = new Set([...modified.stdout.split('\0'), ...untracked.stdout.split('\0')].filter(Boolean));
+  const files = [...new Set([...modified.stdout.split('\0'), ...untracked.stdout.split('\0')].filter(Boolean))];
   for (const relative of files) {
     if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) {
       throw new Error(`unsafe working-tree path: ${relative}`);
     }
+  }
+  await Promise.all(files.map((relative) => {
     const source = path.resolve(cwd, relative);
     const destination = path.resolve(sandbox, relative);
     if (fs.existsSync(source)) {
-      await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-      await fs.promises.copyFile(source, destination);
-    } else {
-      await fs.promises.rm(destination, { force: true });
+      return fs.promises.mkdir(path.dirname(destination), { recursive: true })
+        .then(() => fs.promises.copyFile(source, destination));
     }
+    return fs.promises.rm(destination, { force: true });
+  }));
+}
+
+/** INV-2 default is strict serial (1); only explicit opt-ins raise it. */
+function resolveEvaluationConcurrency(explicit?: number): number {
+  if (explicit !== undefined) {
+    if (!Number.isInteger(explicit) || explicit < 1) {
+      throw new Error(`evaluationConcurrency must be a positive integer, got ${explicit}`);
+    }
+    return explicit;
   }
+  const fromEnv = Number(process.env.RSI_EVAL_CONCURRENCY ?? '');
+  return Number.isInteger(fromEnv) && fromEnv >= 1 ? fromEnv : 1;
 }
 
 async function copyControlledSources(cwd: string, sandbox: string, diffPatch: string): Promise<void> {

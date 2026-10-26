@@ -46,10 +46,11 @@ Submits a generated candidate patch for isolated sandbox evaluation, executes va
   - Returns `EvolutionAction`:
     - `state: 'completed'`: Candidate evaluated, gates passed, and Champion merged atomically to the main workspace.
     - `state: 'rejected'`: Candidate failed hard gates (test failure, non-zero exit code) or was strictly dominated.
-    - `state: 'escalated'`: Deadlock reached (3 consecutive failures) or security violation triggered (file/patch limits exceeded).
+    - `state: 'escalated'`: Deadlock reached (`maxDebugRounds = 2` consecutive identical normalized errors) or security violation triggered (file/patch limits exceeded).
     - `champion`: Details of the accepted winner (`id`, `patchHash`, `changedFiles`, `changedLines`, `durationMs`).
     - `frontier`: IDs of the current Pareto non-dominated set.
     - `applied`: Boolean indicating whether the patch was applied to the main workspace.
+    - `cached`: Boolean; true when this submission reused a terminal outcome already recorded for an identical `patchHash` (INV-1) and skipped the sandbox entirely.
 
 ---
 
@@ -70,10 +71,10 @@ Every agent and tool implementation MUST preserve these four invariants:
 
 | Invariant | Name | Guarantee & Enforcement |
 |---|---|---|
-| **INV-1** | **Ledger Idempotent Pairing & Monotonic Finality** | In the SQLite store (`RsiStore`), every `(run_id, candidate_id)` pair is unique. Once an outcome is marked `verified` or `terminal`, state transitions are monotonic and immutable. Redundant evaluations of identical `patchHash` return cached results. |
-| **INV-2** | **Serial FIFO Scheduling with Global Cap** | All evaluations lock on key `repo:${cwd}` via `KeyedScheduler`. Concurrency limit is strictly `1`. Candidates are evaluated in deterministic FIFO order to prevent CPU and I/O thrashing on 2 vCPU machines. |
-| **INV-3** | **Append-Only Journal Single-Pass Projection** | Evolution history is stored in an append-only ledger (`evolution_records`). Materialized views and statistics are computed via single-pass streaming projections over the last 50 bounded runs. |
-| **INV-4** | **Lossless JSON & FNV-1a Error Debouncing** | JSON payload metadata is serialized and deserialized losslessly. Validation failures compute an FNV-1a 32-bit hash on normalized error messages, suppressing repetitive failure logs and terminating infinite failure loops after 3 strikes. |
+| **INV-1** | **Ledger Idempotent Pairing & Monotonic Finality** | In the SQLite store (`RsiStore`), every `(task_id, sequence)` pair is unique. Once an outcome is terminal, state transitions are monotonic and immutable. Redundant evaluations of identical `patchHash` return cached results — enforced via the `rsi_candidate.patch_hash` column and lookup (`status IN ('passed', 'failed')`) before any sandbox work. |
+| **INV-2** | **Serial FIFO Scheduling with Global Cap** | All evaluations lock on key `repo:${cwd}` via `KeyedScheduler`. Concurrency defaults strictly to `1` (required on 2 vCPU hosts); hosts with ≥4 cores may opt in via `evaluationConcurrency` / `RSI_EVAL_CONCURRENCY`, under which candidates queue on per-candidate keys `repo:${cwd}:eval:${candidateId}` within the global cap. Default order is deterministic FIFO. |
+| **INV-3** | **Append-Only Journal Single-Pass Projection** | Evolution history lives in the append-only SQLite tables `rsi_task` / `rsi_candidate` (bounded to the last 50 settled runs, pruned at settle granularity). Statistics are computed via single-pass streaming projections (`projectStream`); no destructive updates to settled rows. |
+| **INV-4** | **Lossless JSON & FNV-1a Error Debouncing** | JSON payload metadata is serialized and deserialized losslessly. Validation failures compute an FNV-1a 32-bit hash on normalized error messages, suppressing repetitive failure logs and terminating infinite failure loops once the same normalized error recurs for `maxDebugRounds = 2` rounds. |
 
 ---
 
@@ -90,7 +91,7 @@ Agents operating in this repository must use these standard npm/CLI commands:
   ```bash
   npm run typecheck
   ```
-- **Full Test Suite (6 test suites, 30 tests)**:
+- **Full Test Suite (6 test suites, 34 tests)**:
   ```bash
   npm test
   ```
@@ -99,8 +100,13 @@ Agents operating in this repository must use these standard npm/CLI commands:
   npm run gate
   # or node scripts/evolution-gate.mjs --target=all
   ```
-- **Direct CLI Invocation**:
+- **Performance Baseline (per-stage timing JSON)**:
   ```bash
-  node packages/dwfx-core/src/cli.ts profile
-  node packages/dwfx-core/src/cli.ts evaluate --cwd=.
+  npm run perf
+  ```
+- **Direct CLI Invocation** (journal/scheduler/ledger tooling):
+  ```bash
+  node scripts/dwfx.mjs journal verify <db|jsonl>
+  node scripts/dwfx.mjs sched replay <trace.jsonl> --concur 1
+  node scripts/dwfx.mjs ledger report <db|jsonl>
   ```

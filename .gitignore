@@ -3,3 +3,4 @@ node_modules/
 .omp/rsi.db*
 *.log
 .DS_Store
+.zcode/

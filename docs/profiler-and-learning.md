@@ -23,7 +23,7 @@ export interface ContextProfile {
 }
 ```
 
-- **脚本推断优先**：当存在 `package.json` 时，通过 JSON 读取其 `scripts` 字段中的已知脚本名（如 `build`, `test`, `typecheck`, `lint`），动态拼装命令（如 `npm test`、`npm run typecheck`）；
+- **存在性推断，零文件读取**：命令推断只依赖清单/锁文件的存在性组合（如检测到 `package.json` + 锁文件即推断包管理器并拼装 `npm test`、`npm run typecheck` 等命令），**从不打开或解析 `package.json` 的 `scripts` 字段**——推断的是约定俗成的标准脚本名，而非读取仓库自定义脚本；
 - **宿主注入与交互**：
   - `before_agent_start` 钩子将画像格式化为 Markdown 提示块，无感注入模型初始上下文；
   - 开发者或调试人员在终端输入 `/profiler` 指令时，钩子立即拦截并返回当前工程画像，无须耗费模型 Token。

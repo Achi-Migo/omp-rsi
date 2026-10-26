@@ -9,7 +9,8 @@
     "verify": "node scripts/bootstrap.mjs",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
     "test": "node test/pareto-arbiter.test.mjs && node test/evolution-lifecycle.test.mjs && node test/profiler-learning.test.mjs && node test/evolution.test.mjs && node test/dwfx-core.test.mjs && node test/dwfx-cli.test.mjs",
-    "gate": "node scripts/evolution-gate.mjs --target=all"
+    "gate": "node scripts/evolution-gate.mjs --target=all",
+    "perf": "node scripts/perf-baseline.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

@@ -136,6 +136,7 @@ create table if not exists rsi_candidate (
   operator text not null check(operator in ('draft', 'improve', 'debug', 'crossover')),
   parent_ids_json text not null,
   diff_patch text not null,
+  patch_hash text,
   normalized_error_hash text,
   exit_code integer not null default -1,
   duration_ms integer not null default 0,
@@ -147,4 +148,5 @@ create table if not exists rsi_candidate (
 );
 
 create index if not exists rsi_candidate_task_idx on rsi_candidate(task_id, sequence);
+create index if not exists rsi_candidate_patch_hash_idx on rsi_candidate(patch_hash);
 create index if not exists rsi_task_skill_idx on rsi_task(skill_name, status, skill_promoted);
