@@ -1,6 +1,6 @@
 {
-  "name": "@omp/plugin-rsi",
-  "version": "0.1.0",
+  "name": "omp-rsi",
+  "version": "0.1.1",
   "description": "Deterministic Recursive Self-Improvement (RSI) engine for Open Multi-agent Platform (omp)",
   "type": "module",
   "main": "./dist/index.js",
