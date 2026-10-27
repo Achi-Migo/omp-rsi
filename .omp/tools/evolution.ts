@@ -91,7 +91,7 @@ interface EvolutionRun {
 }
 
 export interface EvolutionControllerOptions {
-  cwd: string;
+  cwd?: string;
   dbPath?: string;
   store?: RsiStore;
   evaluator?: EvolutionEvaluator;
@@ -207,7 +207,7 @@ export class EvolutionController {
   private closed = false;
 
   constructor(options: EvolutionControllerOptions) {
-    this.cwd = path.resolve(options.cwd);
+    this.cwd = path.resolve(options.cwd ?? process.cwd());
     this.actorKey = `repo:${this.cwd}`;
     this.store = options.store ?? RsiStore.open(options.dbPath ?? path.join(this.cwd, '.omp/rsi.db'));
     this.ownsStore = options.store === undefined;
@@ -727,7 +727,7 @@ async function copyControlledSources(cwd: string, sandbox: string, diffPatch: st
   }
 }
 
-function toolText(action: EvolutionAction): string {
+export function toolText(action: EvolutionAction): string {
   if (action.taskPrompt) return action.taskPrompt;
   if (action.reason) return action.reason;
   return action.state === 'completed'
@@ -736,7 +736,7 @@ function toolText(action: EvolutionAction): string {
 }
 
 export default function evolutionTools(pi: CustomToolAPI) {
-  const controller = new EvolutionController({ cwd: pi.cwd });
+  const controller = new EvolutionController({ cwd: pi?.cwd ?? process.cwd() });
   return [
     {
       name: 'evolution_begin',

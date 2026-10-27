@@ -11,6 +11,7 @@
     "allowImportingTsExtensions": true
   },
   "include": [
+    "index.ts",
     "src/**/*.ts",
     "packages/dwfx-core/src/**/*.ts",
     ".omp/hooks/**/*.ts",

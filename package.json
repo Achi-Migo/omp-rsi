@@ -1,10 +1,22 @@
 {
-  "name": "@omp/rsi",
+  "name": "@omp/plugin-rsi",
   "version": "0.1.0",
   "description": "Deterministic Recursive Self-Improvement (RSI) engine for Open Multi-agent Platform (omp)",
   "type": "module",
-  "main": "packages/dwfx-core/src/index.ts",
+  "main": "./dist/index.js",
+  "omp": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
   "scripts": {
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
+    "build:plugin": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
     "bootstrap": "node scripts/bootstrap.mjs",
     "verify": "node scripts/bootstrap.mjs",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",

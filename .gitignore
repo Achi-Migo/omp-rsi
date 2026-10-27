@@ -1,6 +1,17 @@
 node_modules
 node_modules/
+dist/
 .omp/rsi.db*
 *.log
 .DS_Store
 .zcode/
+
+server-backup-*
+omp-config-backup-*
+*.sha256
+*.enc
+BACKUP-RESTORE-README.md
+BACKUP-MANIFEST.md
+restore-omp-wsl.sh
+README-WINDOWS-OMP.md
+omplist.tmp

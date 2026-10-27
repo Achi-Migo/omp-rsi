@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "target": "es2024",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "./dist"
+  },
+  "include": [
+    "index.ts",
+    "src/**/*.ts",
+    "packages/dwfx-core/src/**/*.ts",
+    ".omp/hooks/**/*.ts",
+    ".omp/tools/**/*.ts",
+    "assets/omp-host.d.ts"
+  ]
+}
