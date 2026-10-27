@@ -14,9 +14,16 @@
       "./dist/index.js"
     ]
   },
+  "files": [
+    "dist",
+    "README.md",
+    "package.json",
+    "assets"
+  ],
   "scripts": {
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
     "build:plugin": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
+    "prepare": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
     "bootstrap": "node scripts/bootstrap.mjs",
     "verify": "node scripts/bootstrap.mjs",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
