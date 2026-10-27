@@ -1,9 +1,29 @@
 {
   "name": "omp-rsi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Deterministic Recursive Self-Improvement (RSI) engine for Open Multi-agent Platform (omp)",
+  "license": "MIT",
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "plugin",
+    "extension",
+    "rsi",
+    "self-improvement",
+    "pareto",
+    "evolution"
+  ],
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "omp": {
     "extensions": [
       "./dist/index.js"
@@ -24,6 +44,7 @@
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
     "build:plugin": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
     "prepare": "node node_modules/typescript/bin/tsc -p tsconfig.plugin.json",
+    "prepack": "npm run build",
     "bootstrap": "node scripts/bootstrap.mjs",
     "verify": "node scripts/bootstrap.mjs",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
@@ -31,11 +52,25 @@
     "gate": "node scripts/evolution-gate.mjs --target=all",
     "perf": "node scripts/perf-baseline.mjs"
   },
+  "dependencies": {
+    "zod": "^3.23.8 || ^4.0.0"
+  },
   "devDependencies": {
     "@types/node": "^26.6.5",
     "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=22.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Achi-Migo/omp-rsi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Achi-Migo/omp-rsi/issues"
+  },
+  "homepage": "https://github.com/Achi-Migo/omp-rsi#readme",
+  "publishConfig": {
+    "access": "public"
   }
 }

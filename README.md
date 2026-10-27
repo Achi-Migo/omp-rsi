@@ -44,3 +44,22 @@ omp 低资源自进化与高自治系统（RSI: Recursive Self-Improvement）工
   - 宿主工具集：`.omp/tools/evolution.ts`（暴露 `evolution_begin` 与 `evolution_record`）
   - 拦截与学习钩子：`.omp/hooks/pre/context-profiler.ts` 与 `.omp/hooks/pre/evolution-learner.ts`
   - 事实持久化层：`src/journal/rsi-store.ts`
+
+---
+
+## 作为 omp 插件安装与使用
+
+### 1. 一键安装
+```bash
+omp plugin install omp-rsi
+```
+或通过软链接本地调试：
+```bash
+omp plugin link /path/to/omp-rsi
+```
+
+### 2. 插件核心能力
+- **自进化工具注册**：在宿主中注册 `evolution_begin` 与 `evolution_record` 工具。
+- **工程上下文感知**：启动前自动探测注入当前工程技术栈画像（`packageManager`、构建、测试、类型检查命令）。
+- **终局经验客观沉淀**：任务成功终局自动提炼已验证工具至 `.omp/tools/`，高频技能晋升至 `.omp/agent/managed-skills/`。
+- **状态检查命令**：在宿主交互中支持 `/rsi-status` 快速查看当前事实账本与候选方案指标。
